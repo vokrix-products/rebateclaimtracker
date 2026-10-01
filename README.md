@@ -53,3 +53,6 @@ Dashboard:
 
 - Dashboard: Vercel (project `rebateclaimtracker`), builds from `dashboard/` with `vercel.json` SPA rewrites.
 - Poller: Railway, built from the repo-root `Dockerfile` (`CMD ["python3", "poller.py"]`).
+
+Dashboard: https://rebateclaimtracker.vokrix.co
+Vercel: rebateclaimtracker
