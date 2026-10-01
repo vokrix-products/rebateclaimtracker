@@ -1,62 +1,55 @@
-# RebateClaimTracker Backend
+# RebateClaimTracker
 
-RebateClaimTracker is a backend extraction service for rebate claim tracking. It ingests purchase records and vendor rebate agreements and normalizes them into a uniform list of tracking records so a buyer can monitor which rebates still need an agreement, which claim windows are open, closing soon, or expired, and which items need manual review.
+RebateClaimTracker is an automated rebate claim tracking product. It ingests purchase-history files and vendor rebate agreements, extracts normalized rebate tracking records, and surfaces earned, claimed, and received rebate amounts with deadlines and tier gaps by vendor through a web dashboard.
 
-This repository contains pure processing scripts only. No HTTP server is included.
+## Architecture
 
-## Archetype
+This repo contains three cooperating pieces:
 
-This is an **extraction / normalization backend**. There is no UI and no API layer in this repo. The single public entry point is `process_file(file_bytes: bytes) -> list[dict]`, which turns an arbitrary uploaded document into a list of normalized records. A separate poller/service is expected to call this function and persist the resulting records.
+- `processor.py` (repo root + `backend/`): pure extraction logic. `process_file(file_bytes: bytes) -> list[dict]` turns an arbitrary uploaded document (PDF, Excel, CSV, plain text) into normalized rebate records. `extract_text(file_bytes)` tries PDF extraction first and falls back to UTF-8 decode.
+- `poller.py` (repo root + `backend/`): the always-on worker deployed to Railway. It polls the `jobs` table for `status=eq.pending` AND `job_type=eq.process_upload` AND `product_id=eq.$PRODUCT_ID`, downloads the input file from the `uploads` bucket, runs `processor.process_file`, inserts each record into the `records` table, uploads result JSON to the `results` bucket, marks the job `completed`/`failed`, and writes a notification row. It defines a named `poll()` function containing the `while True` loop plus a `time.sleep(60)`; `__main__` calls `poll()`.
+- `dashboard/`: the Vite + React + TanStack Router admin dashboard (Vokrix dashboard template). It provides the records table, upload flow, jobs view, settings, notifications, and audit surfaces. The product copy is driven by `VITE_*` env vars set in Vercel (archetype `extraction`, label `Rebate Claims`).
 
-## Files
+## Data flow
 
-- `processor.py`: extraction logic for PDF, Excel, CSV, and plain text. Defines `process_file(file_bytes: bytes) -> list[dict]`.
-- `run_demo.py`: zero-argument demo using hardcoded CSV data. Exits 0.
-- `run_tests.py`: unit tests for the processor (CSV purchases, text agreements, Excel/plain-CSV fallback).
-- `requirements.txt`: Python dependencies (`openai`, `requests`, `pdfplumber`, `openpyxl`).
+1. A customer uploads a purchase-history CSV or rebate agreement PDF via the dashboard.
+2. The dashboard writes a row to `jobs` (`status=pending`, `job_type=process_upload`) and stores the file in the `uploads` storage bucket.
+3. `poller.py` (Railway) picks up the job, downloads the file, extracts records with `processor.py`, inserts them into `records`, uploads the result to `results`, and updates the job status.
+4. A `notifications` row is created so the dashboard bell reflects success or failure.
 
-## Extraction Pipeline
+## Extractable record statuses
 
-`process_file` tries each strategy in order and returns the first that succeeds:
+`missing_agreement`, `missing_purchase_data`, `missing_required_claim_document`, `unparsed_agreement_line`, `expired_claim_window`, `valid_earned_unclaimed`, `claim_window_open`, `claim_window_closing_soon`, `submitted`, `approved`, `partially_paid`, `paid`, `denied`, `disputed`, `flagged_for_review`, `threshold_gap`, `threshold_reached`, `unreconciled_gap`, `reconciled`, `no_activity`.
 
-1. **PDF** via `pdfplumber` - extracts text, then parses as a rebate agreement (key/value lines).
-2. **Excel** via `openpyxl` - reads the first sheet, treats row 1 as headers, normalizes header names.
-3. **Text / CSV fallback** - decodes UTF-8 and parses CSV purchase rows when the document looks like a purchase export, otherwise parses it as agreement text.
+## Required environment variables
 
-## Record Contract
+Poller / Railway:
 
-Each record returned by `process_file` has these top-level keys:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_KEY`
+- `PRODUCT_ID`
+- `ANTHROPIC_API_KEY`
 
-- `title`: primary entity the buyer tracks, preferred vendor name.
-- `status`: exact status string, including severity suffix.
-- `details`: dictionary of extracted extra fields.
-- `due_date`: ISO-8601 string or `None`.
+Dashboard / Vercel:
 
-### Status Strings
+- `VITE_PRODUCT_ARCHETYPE`, `VITE_RECORDS_LABEL`, `VITE_RECORDS_SUBTITLE`, `VITE_FILTER_PLACEHOLDER`, `VITE_UPLOAD_DESCRIPTION`, `VITE_UPLOAD_EMPTY_STATE`
+- Supabase URL / anon key for the client.
 
-| Status | Severity | Meaning |
-|---|---|---|
-| `missing_agreement:critical` | critical | A purchase record was found but no matching rebate agreement exists. |
-| `missing_purchase_data:warning` | warning | An agreement exists but purchase data is absent. |
-| `unparsed_agreement_line:warning` | warning | Agreement text could not be parsed into known fields. |
-| `expired_claim_window:critical` | critical | The claim deadline has already passed. |
-| `claim_window_open:good` | good | The claim deadline is more than 30 days away. |
-| `claim_window_closing_soon:warning` | warning | The claim deadline is within 30 days. |
-| `flagged_for_review:warning` | warning | Low extraction confidence; needs manual review. |
+## Local development
 
-## What the Poller Expects as Input
+Backend:
 
-The poller hands raw document bytes straight to `process_file`. Accepted inputs:
+    pip install -r requirements.txt
+    python3 run_demo.py
+    python3 run_tests.py
 
-- **Purchase CSV / Excel exports** with headers such as `vendor_name`, `supplier`, `invoice_number`, `invoice_date`, `sku`, `quantity`, `unit_cost`, `unit_list_price`, `extended_cost`, `payment_date`, `product_description`, `manufacturer_part_number`. Header names are normalized (lowercased, non-alphanumerics collapsed to `_`), so minor casing/spacing differences are tolerated.
-- **Rebate agreement text or PDFs** containing `key: value` or `key = value` lines, e.g. `vendor_name: Acme`, `program_name: Widget Rebate`, `claim_deadline: 2099-12-31`.
+Dashboard:
 
-For purchase rows the poller receives one record per row with status `missing_agreement:critical` until an agreement is linked. For agreements the status is derived from the claim deadline and extraction confidence.
+    cd dashboard
+    npm install
+    npm run build
 
-## Running
+## Deployment
 
-```bash
-pip install -r requirements.txt
-python3 run_demo.py   # zero-argument demo, exits 0
-python3 run_tests.py  # unit tests
-```
+- Dashboard: Vercel (project `rebateclaimtracker`), builds from `dashboard/` with `vercel.json` SPA rewrites.
+- Poller: Railway, built from the repo-root `Dockerfile` (`CMD ["python3", "poller.py"]`).
