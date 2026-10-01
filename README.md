@@ -56,3 +56,4 @@ Dashboard:
 
 Dashboard: https://rebateclaimtracker.vokrix.co
 Vercel: rebateclaimtracker
+Railway: rebateclaimtracker
